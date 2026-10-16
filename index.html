@@ -84,6 +84,7 @@
             100% { left: 100%; width: 40%; }
         }
 
+        /* KHÔNG CÓ PARAMETER (TRANG CHỦ DEFAULT) */
         #defaultHomeView {
             display: none;
             max-width: 460px;
@@ -96,6 +97,7 @@
             box-shadow: 0 20px 50px rgba(0,0,0,0.5);
         }
 
+        /* KHUNG CHỨA NỘI DUNG ALBUM */
         #albumContainer {
             width: 100%;
             min-height: 100vh;
@@ -103,6 +105,7 @@
     </style>
 </head>
 <body>
+    <!-- LOADER NỀN TỐI SANG TRỌNG -->
     <div id="luxuryLoader">
         <div class="loader-glow-icon">✨</div>
         <div class="loader-brand-title">DNG'S PHOTOBOOTH</div>
@@ -112,8 +115,10 @@
         </div>
     </div>
 
+    <!-- NỘI DUNG ALBUM INJECT TRỰC TIẾP TỪ CLOUDFLARE R2 -->
     <div id="albumContainer"></div>
 
+    <!-- MÀN HÌNH NẾU KHÔNG CÓ SESSION ID -->
     <div id="defaultHomeView">
         <div style="font-size: 3.5rem; margin-bottom: 16px;">📸</div>
         <h2 style="font-size: 1.4rem; font-weight: 800; color: #ff5da2; margin-bottom: 12px;">Cổng Album Trực Tuyến DNG's Photobooth</h2>
@@ -167,26 +172,113 @@
                     headers: { 'Accept': 'text/html' }
                 });
 
-                if (!res.ok) throw new Error('HTTP ' + res.status);
+                if (!res.ok) {
+                    throw new Error('HTTP ' + res.status);
+                }
 
                 const rawHtml = await res.text();
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(rawHtml, 'text/html');
 
-                let baseEl = doc.querySelector('base');
+                // 2. Chèn thẻ <base> vào document.head thật
+                let baseEl = document.querySelector('base');
                 if (!baseEl) {
-                    baseEl = doc.createElement('base');
-                    doc.head.insertBefore(baseEl, doc.head.firstChild);
+                    baseEl = document.createElement('base');
+                    document.head.insertBefore(baseEl, document.head.firstChild);
                 }
                 baseEl.href = baseUrl;
 
+                // 3. Chuẩn hóa tất cả đường dẫn tương đối thành tuyệt đối R2
+                function toAbsoluteUrl(url) {
+                    if (!url) return url;
+                    url = url.trim();
+                    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('//') || url.startsWith('data:') || url.startsWith('#') || url.startsWith('javascript:')) {
+                        return url;
+                    }
+                    if (url.startsWith('./')) {
+                        url = url.substring(2);
+                    }
+                    return baseUrl + url;
+                }
+
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(rawHtml, 'text/html');
+
+                // Chuẩn hóa ảnh (img)
+                doc.querySelectorAll('img').forEach(el => {
+                    const src = el.getAttribute('src');
+                    if (src) el.setAttribute('src', toAbsoluteUrl(src));
+                    const dsrc = el.getAttribute('data-src');
+                    if (dsrc) el.setAttribute('data-src', toAbsoluteUrl(dsrc));
+                });
+
+                // Chuẩn hóa video & source
+                doc.querySelectorAll('video').forEach(el => {
+                    const src = el.getAttribute('src');
+                    if (src) el.setAttribute('src', toAbsoluteUrl(src));
+                    const poster = el.getAttribute('poster');
+                    if (poster) el.setAttribute('poster', toAbsoluteUrl(poster));
+                    el.setAttribute('playsinline', '');
+                    el.setAttribute('webkit-playsinline', '');
+                    el.muted = true;
+                });
+
+                doc.querySelectorAll('source').forEach(el => {
+                    const src = el.getAttribute('src');
+                    if (src) el.setAttribute('src', toAbsoluteUrl(src));
+                });
+
+                // Chuẩn hóa nút tải về (a)
+                doc.querySelectorAll('a').forEach(el => {
+                    const href = el.getAttribute('href');
+                    if (href) el.setAttribute('href', toAbsoluteUrl(href));
+                    const fb = el.getAttribute('data-fallback-href');
+                    if (fb) el.setAttribute('data-fallback-href', toAbsoluteUrl(fb));
+                });
+
+                // Chuẩn hóa các hàm onclick inline có chứa tên file tương đối
+                doc.querySelectorAll('[onclick]').forEach(el => {
+                    let oc = el.getAttribute('onclick');
+                    if (oc && (oc.includes('.mp4') || oc.includes('.jpg') || oc.includes('.jpeg') || oc.includes('.png') || oc.includes('.webm'))) {
+                        oc = oc.replace(/'([^':]+?\.(?:jpg|jpeg|png|mp4|webm))'/g, function(match, filename) {
+                            return "'" + toAbsoluteUrl(filename) + "'";
+                        });
+                        el.setAttribute('onclick', oc);
+                    }
+                });
+
+                // 4. Inject CSS và meta từ head
                 doc.head.querySelectorAll('style, link[rel="stylesheet"]').forEach(el => {
                     document.head.appendChild(el.cloneNode(true));
                 });
 
-                if (doc.title) document.title = doc.title;
+                if (doc.title) {
+                    document.title = doc.title;
+                }
+
+                // 5. Đưa nội dung body vào container
                 container.innerHTML = doc.body.innerHTML;
 
+                // 6. Hook DOMContentLoaded và load listener để chạy ngay lập tức khi inject
+                const _origDocAddEventListener = document.addEventListener.bind(document);
+                document.addEventListener = function(type, listener, options) {
+                    if (type === 'DOMContentLoaded') {
+                        if (document.readyState === 'complete' || document.readyState === 'interactive') {
+                            setTimeout(listener, 10);
+                            return;
+                        }
+                    }
+                    return _origDocAddEventListener(type, listener, options);
+                };
+
+                const _origWinAddEventListener = window.addEventListener.bind(window);
+                window.addEventListener = function(type, listener, options) {
+                    if (type === 'load' && document.readyState === 'complete') {
+                        setTimeout(listener, 10);
+                        return;
+                    }
+                    return _origWinAddEventListener(type, listener, options);
+                };
+
+                // 7. Kích hoạt và thực thi các thẻ <script> bên trong
                 const scripts = Array.from(doc.querySelectorAll('script'));
                 for (const oldScript of scripts) {
                     const newScript = document.createElement('script');
@@ -195,14 +287,46 @@
                     document.body.appendChild(newScript);
                 }
 
+                document.dispatchEvent(new Event('DOMContentLoaded'));
+
+                // 8. Đảm bảo số lượng file tải về và hàm kiểm tra hạn hoạt động chuẩn xác
                 setTimeout(() => {
-                    if (loader) loader.classList.add('fade-out');
-                    document.querySelectorAll('img, video').forEach(el => el.classList.add('loaded'));
-                }, 180);
+                    const count = document.querySelectorAll('.btn-dl-item').length;
+                    const el = document.getElementById('totalDlCount');
+                    if (el && count > 0) el.textContent = count;
+
+                    if (typeof window.checkAlbumExpiry === 'function') {
+                        window.checkAlbumExpiry();
+                    }
+
+                    document.querySelectorAll('video').forEach(vid => {
+                        vid.muted = true;
+                        vid.playsInline = true;
+                        vid.classList.add('loaded');
+                        const p = vid.play();
+                        if (p && typeof p.catch === 'function') {
+                            p.catch(() => {});
+                        }
+                    });
+
+                    document.querySelectorAll('img').forEach(img => {
+                        img.classList.add('loaded');
+                    });
+                }, 60);
+
+                // 9. Mượt mà ẩn loader và giải phóng tài nguyên
+                setTimeout(() => {
+                    if (loader) {
+                        loader.classList.add('fade-out');
+                        setTimeout(() => {
+                            if (loader.parentNode) loader.parentNode.removeChild(loader);
+                        }, 500);
+                    }
+                }, 250);
 
             } catch (err) {
                 console.error('[Viewer Error]:', err);
-                if (statusText) statusText.innerHTML = '⚠️ Không thể tải album hoặc phiên chụp đã đóng.<br><small style="opacity:0.7;">Vui lòng kiểm tra lại kết nối mạng.</small>';
+                if (statusText) statusText.innerHTML = '⚠️ Không thể tải album hoặc phiên chụp đã đóng.<br><small style="opacity:0.7;">Vui lòng kiểm tra lại kết nối mạng của bạn.</small>';
                 setTimeout(() => {
                     window.location.replace(targetHtmlUrl);
                 }, 1200);
